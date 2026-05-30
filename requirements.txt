@@ -1,0 +1,8 @@
+streamlit
+langchain
+langchain_core
+langchain_community
+tensorflow
+numpy
+pillow
+python-dotenv
