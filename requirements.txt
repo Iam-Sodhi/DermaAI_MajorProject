@@ -1,8 +1,8 @@
-streamlit
-langchain
-langchain_core
-langchain_community
-tensorflow
-numpy
-pillow
-python-dotenv
+streamlit==1.58.0
+langchain==1.3.2
+langchain_core==1.4.0
+langchain_community==0.4.2
+tensorflow-cpu==2.12.0
+numpy==1.24.4
+pillow==9.5.0
+python-dotenv==1.0.0
