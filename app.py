@@ -119,7 +119,8 @@ def load_llm():
     The API key should be present in the `GOOGLE_API_KEY` env var (set from Streamlit secrets).
     Optionally set `GENAI_MODEL` environment variable to choose a specific model (e.g. 'models/gemini-1.0').
     """
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    # Prefer Streamlit secrets (deployed environment) but fall back to env var.
+    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         return None
     genai.configure(api_key=api_key)
