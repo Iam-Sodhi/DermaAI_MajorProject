@@ -219,6 +219,7 @@ def load_model():
     return model
 
 
+<<<<<<< HEAD
 @st.cache_resource(show_spinner=False)
 def load_llm(api_key: str, model_name: str):
     """Create the Gemini chat model through LangChain."""
@@ -228,6 +229,34 @@ def load_llm(api_key: str, model_name: str):
         temperature=0.2,
         max_retries=2,
         timeout=60,
+=======
+    The API key should be present in the `GOOGLE_API_KEY` env var (set from Streamlit secrets).
+    Optionally set `GENAI_MODEL` environment variable to choose a specific model (e.g. 'models/gemini-1.0').
+    """
+    # Prefer Streamlit secrets (deployed environment) but fall back to env var.
+    api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    genai.configure(api_key=api_key)
+    model = os.environ.get("GENAI_MODEL", "models/gemini-2.5-pro")
+    return {"client": genai, "model": model}
+
+# The application will construct prompts dynamically and send them to Gemini.
+# We do not hard-code assistant replies; `generate_response` delegates to the model.
+
+def generate_response(query, disease, llm):
+    """Ask Gemini (via google.generativeai) to answer the user's query in the context of the disease.
+
+    Returns the assistant text or raises an exception on failure.
+    """
+    if llm is None:
+        raise RuntimeError("LLM client not configured")
+
+    system_prompt = (
+        f"You are a medical chatbot specializing in skin diseases. "
+        f"A user has been diagnosed with {disease}. Provide an accurate, helpful, and ethically-minded answer to the user's question. "
+        f"Encourage professional medical consultation where appropriate."
+>>>>>>> 06cb1f9f711087af4e95079ed207a4c293334407
     )
 
 
