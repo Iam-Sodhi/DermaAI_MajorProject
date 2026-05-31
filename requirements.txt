@@ -7,3 +7,4 @@ numpy
 pillow
 python-dotenv
 google-genai
+langchain-google-genai
