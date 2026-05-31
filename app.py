@@ -387,17 +387,12 @@ def render_condition_info(llm) -> None:
 
 
 def render_chat(llm, model_name: str) -> None:
-    st.subheader("💬 Chat with the Assistant")
+    st.subheader("Chat with the Assistant")
 
     disease = st.session_state.current_disease
     if not disease:
         st.warning("Please upload an image to detect a condition before chatting.")
         return
-
-    st.caption(
-        f"Detected condition: **{disease}**. Ask only about this condition, its symptoms, "
-        "treatment options, prevention, monitoring, or when to seek medical care."
-    )
 
     if llm is None:
         st.error(
@@ -406,14 +401,85 @@ def render_chat(llm, model_name: str) -> None:
         )
         return
 
-    with st.expander("LLM configuration", expanded=False):
-        st.write(f"Gemini model: `{model_name}`")
+    st.markdown(
+        """
+        <style>
+            .assistant-panel {
+                border: 1px solid rgba(49, 51, 63, 0.16);
+                border-radius: 8px;
+                padding: 1rem;
+                margin-bottom: 1rem;
+                background: rgba(250, 250, 250, 0.75);
+            }
+            .assistant-meta {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+                margin-top: 0.75rem;
+            }
+            .assistant-pill {
+                border: 1px solid rgba(49, 51, 63, 0.18);
+                border-radius: 999px;
+                padding: 0.25rem 0.65rem;
+                font-size: 0.84rem;
+                color: rgba(49, 51, 63, 0.82);
+                background: white;
+            }
+            .chat-divider {
+                margin: 0.75rem 0 1rem;
+                border-top: 1px solid rgba(49, 51, 63, 0.14);
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"""
+        <div class="assistant-panel">
+            <strong>Ask about the detected condition: {disease}</strong>
+            <div style="margin-top: 0.35rem;">
+                Your question will be answered with Gemini. This assistant gives educational
+                skin-health information and cannot confirm a diagnosis.
+            </div>
+            <div class="assistant-meta">
+                <span class="assistant-pill">Gemini: {model_name}</span>
+                <span class="assistant-pill">Condition: {disease}</span>
+                <span class="assistant-pill">Medical guidance: educational only</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    sample_questions = [
+        f"What symptoms are common with {disease}?",
+        f"When should I see a dermatologist for {disease}?",
+        f"How can {disease} usually be treated or monitored?",
+    ]
+
+    st.caption("Try a quick question or type your own below.")
+    selected_prompt = None
+    for index, question in enumerate(sample_questions):
+        if st.button(
+            question,
+            key=f"sample_question_{index}_{disease}",
+            use_container_width=True,
+        ):
+            selected_prompt = question
+
+    if st.button("Clear chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+    st.markdown('<div class="chat-divider"></div>', unsafe_allow_html=True)
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    chat_prompt = st.chat_input(f"Ask a disease-related question about {disease}...")
+    typed_prompt = st.chat_input(f"Ask a question about {disease}...")
+    chat_prompt = selected_prompt or typed_prompt
     if not chat_prompt:
         return
 
