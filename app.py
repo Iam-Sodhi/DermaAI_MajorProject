@@ -1,238 +1,408 @@
-import streamlit as st
-from PIL import Image
+import json
+import os
+import re
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
+import streamlit as st
 import tensorflow as tf
+from PIL import Image
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.preprocessing.image import img_to_array
-import google.generativeai as genai
-import os
 
-# Initialize session state for API keys
-if 'credentials_submitted' not in st.session_state:
-    st.session_state.credentials_submitted = False
+# Install/update with: pip install -U google-genai
+from google import genai
+from google.genai import types
 
-# Function to check if all required credentials are in Streamlit secrets
-def check_secrets():
-    required_secrets = ["GOOGLE_API_KEY"]
-    return all(secret in st.secrets for secret in required_secrets)
 
-# Function to set up environment from secrets
-def setup_environment_from_secrets():
-    # Expect the user to store their Gemini / Google Generative AI API key
-    # in Streamlit secrets under the key `GOOGLE_API_KEY`.
-    os.environ["GOOGLE_API_KEY"] = st.secrets.get("GOOGLE_API_KEY", "")
-
-# Define constants
+# -----------------------------
+# App configuration
+# -----------------------------
 DISEASE_CLASSES = [
-    'nevus', 'melanoma', 'pigmented benign keratosis',
-    'dermatofibroma', 'squamous cell carcinoma',
-    'basal cell carcinoma', 'vascular lesion', 'actinic keratosis'
+    "nevus",
+    "melanoma",
+    "pigmented benign keratosis",
+    "dermatofibroma",
+    "squamous cell carcinoma",
+    "basal cell carcinoma",
+    "vascular lesion",
+    "actinic keratosis",
 ]
 
-DISEASE_INFO = {
-    "nevus": {
-        "symptoms": "Common symptoms include:\n- Round or oval-shaped moles\n- Brown, tan, or flesh-colored spots\n- Symmetric shape\n- Clear, well-defined borders",
-        "causes": "Main causes include:\n- Genetic factors\n- Sun exposure\n- Melanocyte cell clusters\n- Normal skin development",
-        "preventions": "Prevention and monitoring:\n- Regular self-examination\n- Annual skin checks\n- Sun protection\n- Monitor for changes using ABCDE rule"
-    },
-    "melanoma": {
-        "symptoms": "Common symptoms include:\n- Asymmetric moles\n- Irregular borders\n- Dark brown, black, or multi-colored spots\n- Diameter greater than 6mm\n- Rapid changes in appearance",
-        "causes": "Main causes include:\n- DNA damage due to UV exposure\n- Genetic factors\n- Fair skin and high mole count",
-        "preventions": "Prevention tips:\n- Limit sun exposure\n- Use sunscreen SPF 30+\n- Avoid tanning beds\n- Regular skin checks"
-    },
-    "pigmented benign keratosis": {
-        "symptoms": "Common symptoms include:\n- Dark, waxy, wart-like growths\n- Round or oval shapes\n- Brown, black, or tan color\n- Typically painless",
-        "causes": "Main causes include:\n- Age-related skin changes\n- Possible genetic predisposition",
-        "preventions": "Prevention tips:\n- Not preventable, but monitor for any unusual changes\n- Use sun protection to limit other skin conditions"
-    },
-    "dermatofibroma": {
-        "symptoms": "Common symptoms include:\n- Firm, small, raised bumps\n- Pink, brown, or red coloration\n- Itching or tenderness when touched",
-        "causes": "Main causes include:\n- Minor skin injuries (e.g., insect bites)\n- Genetic factors\n- Overgrowth of skin's fibrous tissue",
-        "preventions": "Prevention and monitoring:\n- Not preventable, but monitor for size or color changes\n- Consult a dermatologist if lesions become painful"
-    },
-    "squamous cell carcinoma": {
-        "symptoms": "Common symptoms include:\n- Red, scaly patches on skin\n- Raised, wart-like bumps\n- Open sores that do not heal\n- Crusting or bleeding lesions",
-        "causes": "Main causes include:\n- Prolonged UV exposure\n- Immunosuppression\n- Previous radiation therapy",
-        "preventions": "Prevention tips:\n- Avoid excessive sun exposure\n- Use sunscreen SPF 30+\n- Regular skin checks\n- Avoid tanning beds"
-    },
-    "basal cell carcinoma": {
-        "symptoms": "Common symptoms include:\n- Pearly or waxy bumps\n- Flat, flesh-colored lesions\n- Bleeding or scabbing sores that heal and reappear",
-        "causes": "Main causes include:\n- Long-term UV exposure\n- History of sunburns\n- Fair skin and age factors",
-        "preventions": "Prevention tips:\n- Sun protection with SPF 30+\n- Avoid peak sun hours\n- Regular self-examinations\n- Use protective clothing"
-    },
-    "vascular lesion": {
-        "symptoms": "Common symptoms include:\n- Red or purple skin discoloration\n- Can be flat or raised\n- May bleed or be tender",
-        "causes": "Main causes include:\n- Abnormal blood vessel formation\n- Genetic factors\n- Injury or trauma to the skin",
-        "preventions": "Prevention and monitoring:\n- Avoid injury to skin\n- Protect skin from sun to avoid worsening lesions"
-    },
-    "actinic keratosis": {
-        "symptoms": "Common symptoms include:\n- Rough, scaly patches on skin\n- Flat or slightly raised lesion\n- Pink, red, or brown coloration\n- Often on sun-exposed areas like face or hands",
-        "causes": "Main causes include:\n- UV exposure\n- Aging and fair skin\n- History of frequent sunburns",
-        "preventions": "Prevention tips:\n- Consistent use of sunscreen SPF 30+\n- Wear protective clothing and hats\n- Avoid tanning beds\n- Regular skin checks"
-    }
-}
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+MODEL_WEIGHTS_PATH = "custom_cnn_skin_disease_classifier_weights.weights.h5"
 
-def preprocess_image(image):
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
+OFF_TOPIC_RESPONSE = (
+    "I can only answer questions about the detected skin condition and directly related "
+    "topics such as symptoms, causes, treatment options, prevention, risk factors, "
+    "follow-up care, and when to see a dermatologist."
+)
+
+MEDICAL_SYSTEM_INSTRUCTION = """
+You are a careful dermatology education assistant inside a skin-condition detection app.
+
+The app has detected this possible skin condition: {disease}.
+
+Rules:
+1. Answer only questions directly related to the detected condition or closely related skin-health care.
+2. If the user asks about anything unrelated, politely refuse and redirect to the detected condition.
+3. Do not claim the image model result is a confirmed diagnosis. Say it is an AI prediction and a dermatologist/clinician should confirm it.
+4. Give practical, plain-language information about symptoms, causes/risk factors, treatment options, prevention, monitoring, and follow-up when asked.
+5. Do not prescribe medication doses or create a personalized treatment plan. Explain common options and recommend professional care.
+6. Mention urgent warning signs when relevant, such as rapid growth, bleeding, severe pain, infection signs, or melanoma ABCDE changes.
+7. Keep answers concise, accurate, and supportive.
+""".strip()
+
+TOPIC_CLASSIFIER_INSTRUCTION = """
+You are a strict routing classifier for a dermatology chatbot.
+
+Detected condition: {disease}
+
+Return allowed=true only if the user asks about the detected condition or a directly related skin-health topic, including:
+- symptoms, signs, appearance, pain, itching, bleeding, spreading, contagiousness
+- causes, risk factors, seriousness, prognosis
+- treatment options, prevention, home care, sun protection, monitoring
+- diagnosis confirmation, biopsy, dermatologist visit, when to seek urgent care
+- medication categories or procedure categories related to the detected skin condition
+
+Return allowed=false for unrelated topics such as programming, schoolwork, sports, celebrities, finance, travel, general trivia, or unrelated medical questions.
+
+Return JSON only in this exact shape:
+{{"allowed": true, "reason": "short reason"}}
+""".strip()
+
+
+def get_secret(name: str, default: str = "") -> str:
+    """Read a Streamlit secret safely, then fall back to environment variables."""
+    try:
+        value = st.secrets.get(name, "")
+    except Exception:
+        value = ""
+    return value or os.environ.get(name, default)
+
+
+def setup_environment_from_secrets() -> None:
+    """Load Gemini credentials from Streamlit secrets or environment variables."""
+    api_key = get_secret("GOOGLE_API_KEY") or get_secret("GEMINI_API_KEY")
+    if api_key:
+        os.environ["GOOGLE_API_KEY"] = api_key
+        os.environ["GEMINI_API_KEY"] = api_key
+
+    model_name = get_secret("GENAI_MODEL")
+    if model_name:
+        os.environ["GENAI_MODEL"] = model_name
+
+
+def preprocess_image(image: Image.Image) -> np.ndarray:
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     image = image.resize((224, 224))
-    img_array = img_to_array(image)
-    img_array = img_array / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
-    return img_array
+    img_array = img_to_array(image) / 255.0
+    return np.expand_dims(img_array, axis=0)
+
 
 @st.cache_resource
-def load_model():
-    model = Sequential([
-        tf.keras.layers.Conv2D(64, (3, 3), activation='relu', input_shape=(224, 224, 3)),
-        tf.keras.layers.BatchNormalization(),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.Dropout(0.2),
-
-        tf.keras.layers.Conv2D(128, (3, 3), activation='relu'),
-        tf.keras.layers.BatchNormalization(),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.Dropout(0.3),
-
-        tf.keras.layers.Conv2D(256, (3, 3), activation='relu'),
-        tf.keras.layers.BatchNormalization(),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.Dropout(0.3),
-
-        tf.keras.layers.Conv2D(512, (3, 3), activation='relu'),
-        tf.keras.layers.BatchNormalization(),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.Dropout(0.4),
-
-        tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.Dense(512, activation='relu'),
-        tf.keras.layers.Dropout(0.5),
-        tf.keras.layers.Dense(len(DISEASE_CLASSES), activation='softmax')
-    ])
-    model.load_weights('custom_cnn_skin_disease_classifier_weights.weights.h5')
+def load_model() -> Sequential:
+    model = Sequential(
+        [
+            tf.keras.layers.Conv2D(64, (3, 3), activation="relu", input_shape=(224, 224, 3)),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Conv2D(128, (3, 3), activation="relu"),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Conv2D(256, (3, 3), activation="relu"),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Conv2D(512, (3, 3), activation="relu"),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Dropout(0.4),
+            tf.keras.layers.GlobalAveragePooling2D(),
+            tf.keras.layers.Dense(512, activation="relu"),
+            tf.keras.layers.Dropout(0.5),
+            tf.keras.layers.Dense(len(DISEASE_CLASSES), activation="softmax"),
+        ]
+    )
+    model.load_weights(MODEL_WEIGHTS_PATH)
     return model
 
-@st.cache_resource
-def load_llm():
-    """Configure and return the Google Generative AI client and default model name.
 
-    The API key should be present in the `GOOGLE_API_KEY` env var (set from Streamlit secrets).
-    Optionally set `GENAI_MODEL` environment variable to choose a specific model (e.g. 'models/gemini-1.0').
-    """
-    api_key = os.environ.get("GOOGLE_API_KEY")
+@st.cache_resource
+def load_llm() -> Dict[str, Any] | None:
+    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
-    genai.configure(api_key=api_key)
-    model = os.environ.get("GENAI_MODEL", "models/gemini-2.5-pro")
-    return {"client": genai, "model": model}
 
-# The application will construct prompts dynamically and send them to Gemini.
-# We do not hard-code assistant replies; `generate_response` delegates to the model.
+    client = genai.Client(api_key=api_key)
+    model_name = os.environ.get("GENAI_MODEL", DEFAULT_GEMINI_MODEL)
+    return {"client": client, "model": model_name}
 
-def generate_response(query, disease, llm):
-    """Ask Gemini (via google.generativeai) to answer the user's query in the context of the disease.
 
-    Returns the assistant text or raises an exception on failure.
-    """
+def get_safety_settings() -> List[types.SafetySetting]:
+    """Basic harm-category filters for a medical education app."""
+    return [
+        types.SafetySetting(
+            category="HARM_CATEGORY_HATE_SPEECH",
+            threshold="BLOCK_MEDIUM_AND_ABOVE",
+        ),
+        types.SafetySetting(
+            category="HARM_CATEGORY_HARASSMENT",
+            threshold="BLOCK_MEDIUM_AND_ABOVE",
+        ),
+        types.SafetySetting(
+            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            threshold="BLOCK_MEDIUM_AND_ABOVE",
+        ),
+        types.SafetySetting(
+            category="HARM_CATEGORY_DANGEROUS_CONTENT",
+            threshold="BLOCK_ONLY_HIGH",
+        ),
+    ]
+
+
+def clean_json_response(text: str) -> Dict[str, Any]:
+    """Parse JSON from Gemini, tolerating accidental markdown fences."""
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start : end + 1]
+
+    return json.loads(cleaned)
+
+
+def local_topic_guard(query: str, disease: str) -> Tuple[bool, str]:
+    """Conservative fallback if the Gemini classifier is unavailable."""
+    q = query.lower()
+    disease_terms = {disease.lower(), *disease.lower().split()}
+    skin_terms = {
+        "skin",
+        "lesion",
+        "mole",
+        "spot",
+        "rash",
+        "bump",
+        "patch",
+        "symptom",
+        "symptoms",
+        "cause",
+        "causes",
+        "risk",
+        "treatment",
+        "treat",
+        "therapy",
+        "medicine",
+        "cream",
+        "surgery",
+        "biopsy",
+        "dermatologist",
+        "doctor",
+        "prevent",
+        "prevention",
+        "sun",
+        "sunscreen",
+        "uv",
+        "itch",
+        "pain",
+        "bleed",
+        "bleeding",
+        "spread",
+        "contagious",
+        "serious",
+        "cancer",
+        "benign",
+        "malignant",
+        "abcde",
+        "follow-up",
+        "urgent",
+    }
+    if any(term in q for term in disease_terms | skin_terms):
+        return True, "Matched detected-condition or skin-care terms."
+    return False, "No detected-condition or skin-care terms found."
+
+
+def is_on_topic(query: str, disease: str, llm: Dict[str, Any] | None) -> Tuple[bool, str]:
+    """Use Gemini as a topic router, with a local keyword fallback."""
     if llm is None:
-        raise RuntimeError("LLM client not configured")
+        return local_topic_guard(query, disease)
 
-    system_prompt = (
-        f"You are a medical chatbot specializing in skin diseases. "
-        f"A user has been diagnosed with {disease}. Provide an accurate, helpful, and ethically-minded answer to the user's question. "
-        f"Encourage professional medical consultation where appropriate."
-    )
+    prompt = f"User question: {query}"
+    try:
+        response = llm["client"].models.generate_content(
+            model=llm["model"],
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=TOPIC_CLASSIFIER_INSTRUCTION.format(disease=disease),
+                response_mime_type="application/json",
+                temperature=0,
+                max_output_tokens=120,
+                safety_settings=get_safety_settings(),
+            ),
+        )
+        data = clean_json_response(response.text or "{}")
+        return bool(data.get("allowed", False)), str(data.get("reason", ""))
+    except Exception:
+        return local_topic_guard(query, disease)
 
-    user_message = query
+
+def format_recent_history(messages: List[Dict[str, str]], max_messages: int = 8) -> str:
+    """Keep only recent chat history to avoid oversized prompts."""
+    recent = messages[-max_messages:]
+    formatted = []
+    for message in recent:
+        role = message.get("role", "user").upper()
+        content = message.get("content", "").strip()
+        if role in {"USER", "ASSISTANT"} and content:
+            formatted.append(f"{role}: {content}")
+    return "\n".join(formatted)
+
+
+def generate_response(
+    query: str,
+    disease: str,
+    llm: Dict[str, Any] | None,
+    chat_history: List[Dict[str, str]],
+) -> str:
+    """Generate a Gemini answer scoped to the detected disease."""
+    if llm is None:
+        return (
+            "Gemini is not configured. Add your GOOGLE_API_KEY or GEMINI_API_KEY "
+            "to Streamlit secrets, then restart the app."
+        )
+
+    allowed, _reason = is_on_topic(query, disease, llm)
+    if not allowed:
+        return f"{OFF_TOPIC_RESPONSE}\n\nDetected condition: **{disease}**."
+
+    history = format_recent_history(chat_history)
+    prompt = f"""
+Detected condition: {disease}
+
+Recent conversation:
+{history if history else "No previous chat messages."}
+
+Answer the latest user question:
+{query}
+""".strip()
 
     try:
-        # Try chat-style API first
-        resp = llm["client"].chat.create(model=llm["model"], messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ])
+        response = llm["client"].models.generate_content(
+            model=llm["model"],
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=MEDICAL_SYSTEM_INSTRUCTION.format(disease=disease),
+                temperature=0.35,
+                max_output_tokens=800,
+                safety_settings=get_safety_settings(),
+            ),
+        )
+        text = (response.text or "").strip()
+        if not text:
+            return "I could not generate a safe answer for that question. Please ask about symptoms, treatment, prevention, or follow-up care for the detected condition."
+        return text
+    except Exception as exc:
+        return f"Sorry, I could not contact Gemini right now. Error: {exc}"
 
-        # Extract text from common response shapes
-        if hasattr(resp, "content"):
-            # simple content attribute
-            return str(resp.content)
-        if isinstance(resp, dict):
-            # dict-like: look for choices/message structure
-            if "choices" in resp and resp["choices"]:
-                choice = resp["choices"][0]
-                if "message" in choice and "content" in choice["message"]:
-                    content = choice["message"]["content"]
-                    if isinstance(content, list):
-                        return "".join(part.get("text", "") for part in content)
-                    return str(content)
-            if "output" in resp:
-                out = resp["output"]
-                if isinstance(out, list) and out:
-                    return out[0].get("content", "")
 
-        # Fallback: try `.text` or `.last` attributes used by some clients
-        if hasattr(resp, "text"):
-            return str(resp.text)
-        if hasattr(resp, "last") and hasattr(resp.last, "content"):
-            return str(resp.last.content)
+def generate_condition_overview(disease: str, llm: Dict[str, Any] | None) -> str:
+    """Generate condition information dynamically instead of using hard-coded disease answers."""
+    if llm is None:
+        return (
+            "Gemini is not configured. Add your GOOGLE_API_KEY or GEMINI_API_KEY "
+            "to Streamlit secrets to view AI-generated condition information."
+        )
 
-        # If nothing matched, return the stringified response
-        return str(resp)
-    except Exception as e:
-        raise
+    prompt = f"""
+Create a concise patient-friendly overview for the detected skin condition: {disease}.
+Include these headings only:
+- What it is
+- Common symptoms/signs
+- Usual treatment options
+- Prevention and monitoring
+- When to see a dermatologist urgently
+""".strip()
 
-def generate_comprehensive_response(disease, topic=None):
-    """Generate a comprehensive response based on the disease and topic"""
-    disease_info = DISEASE_INFO[disease]
-    
-    # Handle general confirmation (yes/sure/okay responses)
-    if topic is None:
-        return (f"Let me tell you about {disease}:\n\n"
-               f"{disease_info['symptoms']}\n\n"
-               "Would you like to know more about the causes or prevention methods?")
-    
-    # Handle specific topics
-    if 'symptom' in topic:
-        return f"Regarding {disease} symptoms:\n\n{disease_info['symptoms']}"
-    elif 'cause' in topic:
-        return f"About the causes of {disease}:\n\n{disease_info['causes']}"
-    elif any(word in topic for word in ['prevent', 'cure', 'treat']):
-        return f"Here's information about preventing and managing {disease}:\n\n{disease_info['preventions']}"
-    else:
-        # Use all information for a comprehensive response
-        return (f"Here's what you should know about {disease}:\n\n"
-               f"SYMPTOMS:\n{disease_info['symptoms']}\n\n"
-               f"CAUSES:\n{disease_info['causes']}\n\n"
-               f"PREVENTION & MANAGEMENT:\n{disease_info['preventions']}")
+    try:
+        response = llm["client"].models.generate_content(
+            model=llm["model"],
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=MEDICAL_SYSTEM_INSTRUCTION.format(disease=disease),
+                temperature=0.25,
+                max_output_tokens=900,
+                safety_settings=get_safety_settings(),
+            ),
+        )
+        return (response.text or "").strip() or "No overview was generated."
+    except Exception as exc:
+        return f"Could not generate condition information. Error: {exc}"
 
-def main():
-    # Sidebar
+
+def reset_chat_for_new_disease(disease: str) -> None:
+    if st.session_state.get("chat_disease") != disease:
+        st.session_state.messages = []
+        st.session_state.chat_disease = disease
+
+
+def initialize_session_state() -> None:
+    defaults = {
+        "messages": [],
+        "current_disease": None,
+        "current_confidence": None,
+        "chat_disease": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def render_sidebar() -> str:
     st.sidebar.title("Navigation")
     st.sidebar.markdown("Navigate through the app to explore features:")
     options = ["Upload Image", "View Condition Info", "Chat with Assistant"]
     choice = st.sidebar.radio("Select a section:", options)
     st.sidebar.markdown("___")
-    st.sidebar.info("💡 **Tip:** For better accuracy, upload clear images in good lighting.")
+    st.sidebar.info("💡 Tip: For better accuracy, upload clear images in good lighting.")
+    return choice
 
-    st.title("🌟 Skin Disease Detection and Assistant")
 
-    # Load models
-    model = load_model()
-    # populate environment variables from Streamlit secrets (e.g. GOOGLE_API_KEY)
+def main() -> None:
     setup_environment_from_secrets()
+    initialize_session_state()
+
+    choice = render_sidebar()
+    st.title("🌟 Skin Disease Detection and Assistant")
+    st.caption(
+        "Educational tool only. The image model prediction is not a confirmed medical diagnosis. "
+        "Please consult a qualified clinician or dermatologist."
+    )
+
+    try:
+        model = load_model()
+    except Exception as exc:
+        st.error(f"Could not load the image classifier weights: {exc}")
+        return
+
     llm = load_llm()
+    if llm is None:
+        st.sidebar.warning("Gemini API key is missing. Add GOOGLE_API_KEY in Streamlit secrets.")
+    else:
+        st.sidebar.success(f"Gemini model: {llm['model']}")
 
-    # Initialize session state
-    if 'messages' not in st.session_state:
-        st.session_state.messages = []
-    if 'current_disease' not in st.session_state:
-        st.session_state.current_disease = None
-
-    # Handle different sections
     if choice == "Upload Image":
         st.subheader("📤 Upload an Image")
-        uploaded_file = st.file_uploader("Upload an image of the affected skin area", type=["jpg", "jpeg", "png"])
-        
+        uploaded_file = st.file_uploader(
+            "Upload an image of the affected skin area",
+            type=["jpg", "jpeg", "png"],
+        )
+
         if uploaded_file:
             image = Image.open(uploaded_file)
             st.image(image, caption="Uploaded Image", use_container_width=True)
@@ -240,81 +410,80 @@ def main():
             try:
                 processed_image = preprocess_image(image)
                 prediction = model.predict(processed_image)
-                predicted_class = DISEASE_CLASSES[np.argmax(prediction[0])]
-                confidence = np.max(prediction[0]) * 100
+                predicted_class = DISEASE_CLASSES[int(np.argmax(prediction[0]))]
+                confidence = float(np.max(prediction[0]) * 100)
+
+                if st.session_state.current_disease != predicted_class:
+                    st.session_state.messages = []
+                    st.session_state.chat_disease = predicted_class
 
                 st.session_state.current_disease = predicted_class
-                st.success(f"Detected Condition: **{predicted_class}** (Confidence: {confidence:.2f}%)")
-            except Exception as e:
-                st.error(f"Error processing image: {str(e)}")
+                st.session_state.current_confidence = confidence
+
+                st.success(
+                    f"Detected Condition: **{predicted_class}** "
+                    f"(Model confidence: {confidence:.2f}%)"
+                )
+                st.info("Go to **Chat with Assistant** to ask questions about this detected condition.")
+            except Exception as exc:
+                st.error(f"Error processing image: {exc}")
 
     elif choice == "View Condition Info":
-        st.subheader("🔍 Disease Information")
-        if st.session_state.current_disease:
-            disease = st.session_state.current_disease
-            st.write(f"**Condition:** {disease}")
-            with st.expander("Symptoms"):
-                st.markdown(DISEASE_INFO[disease]["symptoms"])
-            with st.expander("Causes"):
-                st.markdown(DISEASE_INFO[disease]["causes"])
-            with st.expander("Prevention & Cures"):
-                st.markdown(DISEASE_INFO[disease]["preventions"])
-        else:
-            st.warning("Upload an image to detect the condition first.")
+        st.subheader("🔍 Condition Information")
+        disease = st.session_state.current_disease
+        if not disease:
+            st.warning("Upload an image to detect a condition first.")
+            return
+
+        st.write(f"**Detected condition:** {disease}")
+        if st.session_state.current_confidence is not None:
+            st.write(f"**Model confidence:** {st.session_state.current_confidence:.2f}%")
+
+        with st.spinner("Generating condition overview with Gemini..."):
+            st.markdown(generate_condition_overview(disease, llm))
 
     elif choice == "Chat with Assistant":
         st.subheader("💬 Chat with the Assistant")
+        disease = st.session_state.current_disease
+        if not disease:
+            st.warning("Please upload an image to detect a condition before chatting.")
+            return
 
-        if st.session_state.current_disease:
-            if 'initial_prompt_shown' not in st.session_state:
-                st.session_state.initial_prompt_shown = True
-                try:
-                    initial_prompt = generate_response(f"What would you like to know about {st.session_state.current_disease}?", st.session_state.current_disease, llm)
-                except Exception:
-                    initial_prompt = f"I can help you with information about {st.session_state.current_disease}. What specific questions do you have?"
+        reset_chat_for_new_disease(disease)
+        st.info(
+            f"Detected condition: **{disease}**. Ask only about this condition, such as symptoms, "
+            "treatment, prevention, risk factors, or follow-up care."
+        )
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": initial_prompt
-                })
+        if st.button("Clear chat"):
+            st.session_state.messages = []
+            st.rerun()
 
-            # Display chat messages
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.write(message["content"])
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-            # User chat input
-            chat_prompt = st.chat_input("Ask about your condition or other skin-related topics...")
-            if chat_prompt:
-            # Append user message
-                st.session_state.messages.append({"role": "user", "content": chat_prompt})
-                with st.chat_message("user"):
-                    st.write(chat_prompt)
+        chat_prompt = st.chat_input(
+            f"Ask about {disease}: symptoms, treatment, prevention, risk, or follow-up..."
+        )
 
-                # Filter input to ensure it’s related to skin and its conditions
-                skin_related_keywords = ['skin', 'disease', 'symptom', 'rash', 'infection', 'condition', 'treatment', 'prevention', 'care', 'cure']
-                if any(keyword in chat_prompt.lower() for keyword in skin_related_keywords):
-                    try:
-                        # Generate response with disease context via Gemini
-                        response = generate_response(chat_prompt, st.session_state.current_disease, llm)
-                    except Exception:
-                        # Fallback response for LLM errors
-                        response = generate_comprehensive_response(st.session_state.current_disease)
-                else:
-                    response = ("Please ask about skin health, skin diseases, or care and treatment for skin conditions.")
+        if chat_prompt:
+            st.session_state.messages.append({"role": "user", "content": chat_prompt})
+            with st.chat_message("user"):
+                st.markdown(chat_prompt)
 
-                # Add follow-up suggestions to keep the conversation on-topic
-                response += "\n\nYou can also ask about:\n" \
-                       "• Specific symptoms to watch for\n" \
-                       "• Risk factors and causes\n" \
-                       "• Treatment options and prevention strategies for skin conditions"
+            with st.chat_message("assistant"):
+                with st.spinner("Generating answer..."):
+                    response = generate_response(
+                        query=chat_prompt,
+                        disease=disease,
+                        llm=llm,
+                        chat_history=st.session_state.messages,
+                    )
+                    st.markdown(response)
 
-                # Append and display assistant's response
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                with st.chat_message("assistant"):
-                    st.write(response)
-        else:
-            st.warning("Please upload an image to diagnose your condition before chatting.")
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
 
 if __name__ == "__main__":
     main()
