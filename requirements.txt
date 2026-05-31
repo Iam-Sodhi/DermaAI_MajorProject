@@ -6,3 +6,4 @@ tensorflow
 numpy
 pillow
 python-dotenv
+google-generativeai

@@ -4,9 +4,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.preprocessing.image import img_to_array
-from langchain_community.llms import Ollama
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
+import google.generativeai as genai
 import os
 
 # Initialize session state for API keys
@@ -15,14 +13,14 @@ if 'credentials_submitted' not in st.session_state:
 
 # Function to check if all required credentials are in Streamlit secrets
 def check_secrets():
-    required_secrets = ["LANGCHAIN_API_KEY", "LANGCHAIN_PROJECT"]
+    required_secrets = ["GOOGLE_API_KEY"]
     return all(secret in st.secrets for secret in required_secrets)
 
 # Function to set up environment from secrets
 def setup_environment_from_secrets():
-    os.environ["LANGCHAIN_API_KEY"] = st.secrets["LANGCHAIN_API_KEY"]
-    os.environ["LANGCHAIN_TRACKING_V2"] = "true"
-    os.environ["LANGCHAIN_PROJECT"] = st.secrets["LANGCHAIN_PROJECT"]
+    # Expect the user to store their Gemini / Google Generative AI API key
+    # in Streamlit secrets under the key `GOOGLE_API_KEY`.
+    os.environ["GOOGLE_API_KEY"] = st.secrets.get("GOOGLE_API_KEY", "")
 
 # Define constants
 DISEASE_CLASSES = [
@@ -116,20 +114,72 @@ def load_model():
 
 @st.cache_resource
 def load_llm():
-    llm = Ollama(model="llama2")
-    return llm
+    """Configure and return the Google Generative AI client and default model name.
 
-prompt = PromptTemplate(
-    template="""You are a medical chatbot specializing in skin diseases. 
-    A user has been diagnosed with {disease} and asks: {query}. 
-    Provide accurate, helpful information while being mindful of medical ethics and encouraging professional medical consultation.""",
-    input_variables=["disease", "query"]
-)
+    The API key should be present in the `GOOGLE_API_KEY` env var (set from Streamlit secrets).
+    Optionally set `GENAI_MODEL` environment variable to choose a specific model (e.g. 'models/gemini-1.0').
+    """
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    genai.configure(api_key=api_key)
+    model = os.environ.get("GENAI_MODEL", "models/gemini-2.5-pro")
+    return {"client": genai, "model": model}
+
+# The application will construct prompts dynamically and send them to Gemini.
+# We do not hard-code assistant replies; `generate_response` delegates to the model.
 
 def generate_response(query, disease, llm):
-    chain = prompt | llm | StrOutputParser()
-    response = chain.invoke({"disease": disease, "query": query})
-    return response
+    """Ask Gemini (via google.generativeai) to answer the user's query in the context of the disease.
+
+    Returns the assistant text or raises an exception on failure.
+    """
+    if llm is None:
+        raise RuntimeError("LLM client not configured")
+
+    system_prompt = (
+        f"You are a medical chatbot specializing in skin diseases. "
+        f"A user has been diagnosed with {disease}. Provide an accurate, helpful, and ethically-minded answer to the user's question. "
+        f"Encourage professional medical consultation where appropriate."
+    )
+
+    user_message = query
+
+    try:
+        # Try chat-style API first
+        resp = llm["client"].chat.create(model=llm["model"], messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message}
+        ])
+
+        # Extract text from common response shapes
+        if hasattr(resp, "content"):
+            # simple content attribute
+            return str(resp.content)
+        if isinstance(resp, dict):
+            # dict-like: look for choices/message structure
+            if "choices" in resp and resp["choices"]:
+                choice = resp["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    content = choice["message"]["content"]
+                    if isinstance(content, list):
+                        return "".join(part.get("text", "") for part in content)
+                    return str(content)
+            if "output" in resp:
+                out = resp["output"]
+                if isinstance(out, list) and out:
+                    return out[0].get("content", "")
+
+        # Fallback: try `.text` or `.last` attributes used by some clients
+        if hasattr(resp, "text"):
+            return str(resp.text)
+        if hasattr(resp, "last") and hasattr(resp.last, "content"):
+            return str(resp.last.content)
+
+        # If nothing matched, return the stringified response
+        return str(resp)
+    except Exception as e:
+        raise
 
 def generate_comprehensive_response(disease, topic=None):
     """Generate a comprehensive response based on the disease and topic"""
@@ -168,6 +218,8 @@ def main():
 
     # Load models
     model = load_model()
+    # populate environment variables from Streamlit secrets (e.g. GOOGLE_API_KEY)
+    setup_environment_from_secrets()
     llm = load_llm()
 
     # Initialize session state
@@ -217,14 +269,14 @@ def main():
             if 'initial_prompt_shown' not in st.session_state:
                 st.session_state.initial_prompt_shown = True
                 try:
-                    initial_prompt = llm.invoke(f"What would you like to know about {st.session_state.current_disease}?")
+                    initial_prompt = generate_response(f"What would you like to know about {st.session_state.current_disease}?", st.session_state.current_disease, llm)
                 except Exception:
                     initial_prompt = f"I can help you with information about {st.session_state.current_disease}. What specific questions do you have?"
-                
+
                 st.session_state.messages.append({
-                "role": "assistant",
-                "content": initial_prompt
-            })
+                    "role": "assistant",
+                    "content": initial_prompt
+                })
 
             # Display chat messages
             for message in st.session_state.messages:
@@ -243,15 +295,10 @@ def main():
                 skin_related_keywords = ['skin', 'disease', 'symptom', 'rash', 'infection', 'condition', 'treatment', 'prevention', 'care', 'cure']
                 if any(keyword in chat_prompt.lower() for keyword in skin_related_keywords):
                     try:
-                    # Generate response with disease context
-                        llm_response = llm.invoke(f"{chat_prompt} in the context of {st.session_state.current_disease} or general skin health")
-                        # Check if response is on-topic
-                        if any(keyword in llm_response.lower() for keyword in skin_related_keywords):
-                            response = llm_response
-                        else:
-                            response = generate_comprehensive_response(st.session_state.current_disease)
-                    except Exception as e:
-                    # Fallback response for LLM errors
+                        # Generate response with disease context via Gemini
+                        response = generate_response(chat_prompt, st.session_state.current_disease, llm)
+                    except Exception:
+                        # Fallback response for LLM errors
                         response = generate_comprehensive_response(st.session_state.current_disease)
                 else:
                     response = ("Please ask about skin health, skin diseases, or care and treatment for skin conditions.")
