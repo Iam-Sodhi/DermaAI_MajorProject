@@ -10,9 +10,24 @@ from PIL import Image
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.preprocessing.image import img_to_array
 
-# Install/update with: pip install -U google-genai
-from google import genai
-from google.genai import types
+# Try multiple GenAI client import styles. Prefer the official `google-genai` package.
+genai = None
+types = None
+try:
+    # Preferred import used by the newest Google GenAI client package
+    from google import genai as _genai
+    from google.genai import types as _types
+    genai = _genai
+    types = _types
+except Exception:
+    try:
+        # Fallback to older/alternate package name if present
+        import google.generativeai as _genai2
+        genai = _genai2
+        types = getattr(_genai2, "types", None)
+    except Exception:
+        genai = None
+        types = None
 
 
 # -----------------------------
@@ -137,7 +152,26 @@ def load_llm() -> Dict[str, Any] | None:
     if not api_key:
         return None
 
-    client = genai.Client(api_key=api_key)
+    if genai is None:
+        return None
+
+    # Newer google-genai exposes a `Client` class (preferred). Older packages
+    # may expose a module-level API (configure + functions). Support both
+    # where possible; otherwise return None so the app can show a helpful message.
+    client = None
+    try:
+        if hasattr(genai, "Client"):
+            client = genai.Client(api_key=api_key)
+        elif hasattr(genai, "configure"):
+            # Module-style API: configure the module and use it as the client
+            genai.configure(api_key=api_key)
+            client = genai
+    except Exception:
+        return None
+
+    if client is None:
+        return None
+
     model_name = os.environ.get("GENAI_MODEL", DEFAULT_GEMINI_MODEL)
     return {"client": client, "model": model_name}
 
